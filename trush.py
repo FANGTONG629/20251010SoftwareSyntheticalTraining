@@ -21,6 +21,11 @@ file structure
         -1
         -...
         -40
+    -test
+        -test1.jpg
+        -test2.jpg
+        -...
+        -test400.jpg
     -eval.txt
     -garbage_dict.json
     -readme.json
@@ -31,6 +36,7 @@ file structure
 -3437279.ipynb
 -infer_image.jpg
 -main.ipynb
+-result.txt
 
 '''
 
@@ -67,7 +73,7 @@ train_parameters = {
     "learning_strategy": {                                    #优化函数相关的配置
         "lr": 0.0001                                          #超参数学习率
     },
-    "test_path": "/home/aistudio/data/data126282/test",  # 测试集路径
+    "test_path": "/home/aistudio/data/test",  # 测试集路径
     "test_list_path": "/home/aistudio/data/testpath.txt",  # 测试集文件列表
     "result_path": "/home/aistudio/result.txt",  # 结果文件路径
     "checkpoints": "/home/aistudio/work/checkpoints"          #保存的路径
@@ -81,6 +87,15 @@ def unzip_data(src_path,target_path):
     解压原始数据集，将src_path路径下的zip包解压至target_path目录下
     '''
     if(not os.path.isdir(target_path + "train")):     
+        z = zipfile.ZipFile(src_path, 'r')
+        z.extractall(path=target_path)
+        z.close()
+
+def unzip_data_t(src_path,target_path):
+    '''
+    解压原始数据集，将src_path路径下的zip包解压至target_path目录下
+    '''
+    if(not os.path.isdir(target_path + "test")):     
         z = zipfile.ZipFile(src_path, 'r')
         z.extractall(path=target_path)
         z.close()
@@ -179,6 +194,7 @@ eval_list_path=train_parameters['eval_list_path']
 解压原始数据到指定路径
 '''
 unzip_data(src_path,target_path)
+unzip_data_t("/home/aistudio/data/data126282/test.zip",target_path)
 
 '''
 划分训练集与验证集，乱序，生成数据列表
@@ -418,80 +434,6 @@ result = model_eval.evaluate(eval_data=Reader(data_path='/home/aistudio/data', m
 
 
 
-# 测试集预测和结果输出
-def predict_test_set_efficient():
-    print("开始高效预测测试集...")
-    
-    # 读取测试集文件列表
-    with open(train_parameters['test_list_path'], 'r') as f:
-        test_files = [line.strip() for line in f.readlines() if line.strip()]
-    
-    print(f"测试集文件数量: {len(test_files)}")
-    
-    # 创建测试集数据读取器
-    class TestDataset(Dataset):
-        def __init__(self, test_files):
-            super().__init__()
-            self.test_files = test_files
-            self.test_path = train_parameters['test_path']
-            
-        def __getitem__(self, index):
-            img_name = self.test_files[index]
-            img_path = os.path.join(self.test_path, img_name)
-            
-            img = Image.open(img_path)
-            if img.mode != 'RGB': 
-                img = img.convert('RGB') 
-            img = img.resize((224, 224), Image.BILINEAR)  # 使用BILINEAR加快速度
-            img = np.array(img).astype('float32') 
-            img = img.transpose((2, 0, 1)) / 255
-            
-            return img
-            
-        def __len__(self):
-            return len(self.test_files)
-    
-    # 创建测试数据集
-    test_dataset = TestDataset(test_files)
-    
-    # 加载训练好的模型
-    model = paddle.Model(VGGNet(), inputs=input_define)
-    model.load("./output/final")
-    model.prepare()
-    
-    # 直接使用model.predict进行批量预测
-    predictions = model.predict(test_data=test_dataset, batch_size=32)
-    
-    # 获取预测结果
-    pred_labels = np.argmax(predictions[0], axis=1)
-    
-    # 生成结果并保存
-    results = []
-    for img_name, pred_label in zip(test_files, pred_labels):
-        results.append(f"{img_name} {pred_label}")
-    
-    # 写入结果文件
-    with open(train_parameters['result_path'], 'w') as f:
-        for result in results:
-            f.write(result + '\n')
-    
-    print(f"预测完成！结果已保存到: {train_parameters['result_path']}")
-    print(f"总共预测了 {len(results)} 张图片")
-    
-    # 验证结果格式
-    if len(results) == 400:
-        print("结果文件包含400行数据，格式正确")
-    else:
-        print(f"结果文件包含 {len(results)} 行数据，应为400行")
-    
-    # 显示前10个预测结果
-    print("\n前10个预测结果:")
-    for i in range(min(10, len(results))):
-        print(results[i])
-
-# 执行测试集预测
-predict_test_set_efficient()
-
 
 
 # 模型预测
@@ -522,6 +464,56 @@ class InferDataset(Dataset): # 与定义Reader的方式相同
 
     def __len__(self):
         return len(self.img_paths)
+    
+
+
+# 测试集预测
+def predict_test_set_simple():
+    print("=== 开始测试集预测 ===")
+    
+    # 读取测试集文件列表
+    with open(train_parameters['test_list_path'], 'r') as f:
+        test_files = [line.strip() for line in f.readlines() if line.strip()]
+    
+    all_results = []
+    
+    # 实例化推理模型
+    model = paddle.Model(VGGNet(), inputs=input_define)
+    model.load("./output/final")
+    model.prepare()
+    
+    for i, img_name in enumerate(test_files):
+        img_path = os.path.join(train_parameters['test_path'], img_name)
+        
+        try:
+            # 完全模仿单张图片预测的流程
+            infer_data = InferDataset(img_path)
+            result = model.predict(test_data=infer_data)[0]
+            
+            result = paddle.to_tensor(result)
+            result = paddle.nn.functional.softmax(result)
+            lab = np.argmax(result.numpy())
+            
+            all_results.append(img_name + "\t" + str(lab))
+            
+        except Exception as e:
+            print(f"处理 {img_name} 出错: {e}")
+            all_results.append(img_name + "\t" + "0")
+        
+        if (i + 1) % 50 == 0:
+            print(f"已处理 {i + 1} 张图片")
+    
+    # 写入结果文件
+    with open("/home/aistudio/result.txt", 'w') as f:
+        for result in all_results:
+            f.write(result + '\n')
+    
+    print("✅ 预测完成！")
+    return all_results
+
+# 执行预测
+test_results = predict_test_set_simple()
+
 
         
 label_dic = train_parameters['label_dict']
