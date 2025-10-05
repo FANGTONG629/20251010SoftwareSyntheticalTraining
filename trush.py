@@ -71,7 +71,7 @@ train_parameters = {
     "skip_steps": 10,
     "save_steps": 300, 
     "learning_strategy": {                                    #优化函数相关的配置
-        "lr": 0.0002                                          #超参数学习率
+        "lr": 0.0001                                          #超参数学习率
     },
     "test_path": "/home/aistudio/data/test",  # 测试集路径
     "test_list_path": "/home/aistudio/data/testpath.txt",  # 测试集文件列表
@@ -396,6 +396,39 @@ class VGGNet(paddle.nn.Layer):
 
 
 
+
+# ResNet101模型
+class ResNetModel(paddle.nn.Layer):
+    def __init__(self, num_classes=40):
+        super(ResNetModel, self).__init__()
+        
+        # 加载预训练的ResNet101模型
+        self.backbone = paddle.vision.models.resnet101(pretrained=True)
+        
+        # 获取ResNet101的输出特征维度
+        in_features = self.backbone.fc.weight.shape[0]
+        
+        # 替换最后的全连接层，适配我们的分类任务
+        self.backbone.fc = paddle.nn.Linear(in_features, num_classes)
+        
+        # 添加Dropout层防止过拟合
+        self.dropout = paddle.nn.Dropout(0.2)
+
+    def forward(self, x, label=None):
+        # 前向传播
+        x = self.backbone(x)
+        x = self.dropout(x)
+        
+        if label is not None:
+            # 计算准确率
+            acc = paddle.metric.accuracy(input=x, label=label)
+            return x, acc
+        else:
+            return x
+        
+
+
+
 # 模型训练
 
 print(train_parameters['class_dim'])
@@ -412,19 +445,21 @@ label_define = paddle.static.InputSpec(shape=[-1, 1],
                                        dtype="int64",
                                        name="label")  
 
+ # 实例化网络 - 使用ResNet101
+model = ResNetModel(num_classes=train_parameters['class_dim'])
+model = paddle.Model(model, inputs=input_define, labels=label_define)
+
+'''
 model = VGGNet()
 model = paddle.Model(model, inputs=input_define, labels=label_define) # 高层API的模型包装器，提供训练、评估等高级功能
+'''
 params_info = model.summary((1,3,244,244)) # 生成模型的详细结构信息
 print(params_info) # 打印模型基础结构和参数信息
-
-# 实例化网络
-model = VGGNet()
-model = paddle.Model(model, inputs=input_define, labels=label_define)
 
 # 使用内置的学习率调度器
 warmup_epochs = 7
 total_epochs = 25
-base_lr = 0.0002
+base_lr = 0.0001
 
 # 创建线性热身 + 余弦衰减的学习率调度器
 lr = paddle.optimizer.lr.LinearWarmup(
@@ -437,9 +472,12 @@ lr = paddle.optimizer.lr.LinearWarmup(
     end_lr=base_lr
 )
 
-
+optimizer = paddle.optimizer.Adam(learning_rate=lr,
+                                  parameters=model.parameters()) # 优化器，常用的梯度下降算法
+'''
 optimizer = paddle.optimizer.Adam(learning_rate=train_parameters['learning_strategy']['lr'],
                                   parameters=model.parameters()) # 优化器，常用的梯度下降算法
+'''
 # 模型准备
 model.prepare(optimizer=optimizer,
                 loss=paddle.nn.CrossEntropyLoss(),   # 损失函数使用交叉熵，
@@ -460,8 +498,12 @@ model.fit(train_data=Reader(data_path='/home/aistudio/data', mode='train'),
 
 
 # 模型评估
+# 实例化模型对象并加载模型参数 - 使用ResNetModel
+model_eval = paddle.Model(ResNetModel(num_classes=train_parameters['class_dim']), inputs=input_define, labels=label_define)
+'''
 # 实例化模型对象并加载模型参数
 model_eval = paddle.Model(VGGNet(), inputs=input_define, labels=label_define) # 创建了一个空的模型框架，具有VGG16的网络结构，但参数尚未初始化或加载。
+'''
 model_eval.load('output/final') # 从指定路径加载预训练的模型参数
 
 model_eval.prepare(metrics=paddle.metric.Accuracy())    # 评价指标使用准确率
@@ -513,8 +555,12 @@ def predict_test_set_simple():
     
     all_results = []
     
+    # 实例化推理模型 - 使用ResNetModel
+    model = paddle.Model(ResNetModel(num_classes=train_parameters['class_dim']), inputs=input_define)
+    '''
     # 实例化推理模型
     model = paddle.Model(VGGNet(), inputs=input_define)
+    '''
     model.load("./output/final")
     model.prepare()
     
@@ -551,7 +597,8 @@ def predict_test_set_simple():
 test_results = predict_test_set_simple()
 
 
-        
+
+# 模型预测     
 label_dic = train_parameters['label_dict']
 print(label_dic)
 infer_path='infer_image.jpg'
@@ -560,8 +607,12 @@ infer_img = Image.open(infer_path)
 plt.imshow(infer_img)          
 #显示图像
 plt.show()                    
+# 实例化推理模型 - 使用ResNetModel
+model = paddle.Model(ResNetModel(num_classes=train_parameters['class_dim']), inputs=input_define)
+'''                  
 # 实例化推理模型
 model = paddle.Model(VGGNet(), inputs=input_define)
+'''
 # 读取刚刚训练好的参数
 model.load("./output/final")
 # 初始化模型
