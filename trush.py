@@ -71,7 +71,7 @@ train_parameters = {
     "skip_steps": 10,
     "save_steps": 300, 
     "learning_strategy": {                                    #优化函数相关的配置
-        "lr": 0.0001                                          #超参数学习率
+        "lr": 0.0002                                          #超参数学习率
     },
     "test_path": "/home/aistudio/data/test",  # 测试集路径
     "test_list_path": "/home/aistudio/data/testpath.txt",  # 测试集文件列表
@@ -249,6 +249,25 @@ class Reader(Dataset):
         :param index: 文件索引号
         :return:
         """
+        # 替换原有的简单预处理，使用数据增强组合
+        transform = T.Compose([
+            T.RandomResizedCrop(224),           # 随机裁剪并缩放
+            T.RandomHorizontalFlip(0.2),        # 50%概率水平翻转
+            T.RandomRotation(15),               # 随机旋转±15度
+            T.ColorJitter(brightness=0.1,       # 亮度调整
+                        contrast=0.1,         # 对比度调整
+                        saturation=0.1,        # 饱和度调整
+                        hue=0.05),              # 色相调整
+            T.ToTensor(),                       # 转为Tensor
+            T.Normalize(mean=[0.485, 0.456, 0.406],  # ImageNet标准归一化
+                    std=[0.229, 0.224, 0.225])
+        ])
+        
+        img = transform(img)
+        label = self.labels[index]
+        label = np.array([label], dtype="int64")
+        return img, label
+        '''
         # 第一步打开图像文件并获取label值
         img_path = self.img_paths[index]
         img = Image.open(img_path)
@@ -260,6 +279,7 @@ class Reader(Dataset):
         label = self.labels[index]
         label = np.array([label], dtype="int64")
         return img, label 
+        '''
 
     def print_sample(self, index: int = 0):
         print("文件名", self.img_paths[index], "\t标签值", self.labels[index])
@@ -401,6 +421,22 @@ print(params_info) # 打印模型基础结构和参数信息
 model = VGGNet()
 model = paddle.Model(model, inputs=input_define, labels=label_define)
 
+# 使用内置的学习率调度器
+warmup_epochs = 7
+total_epochs = 25
+base_lr = 0.0002
+
+# 创建线性热身 + 余弦衰减的学习率调度器
+lr = paddle.optimizer.lr.LinearWarmup(
+    learning_rate=paddle.optimizer.lr.CosineAnnealingDecay(
+        learning_rate=base_lr,
+        T_max=total_epochs - warmup_epochs
+    ),
+    warmup_steps=warmup_epochs * 787,  # 假设每个epoch有100个step
+    start_lr=base_lr / 10,
+    end_lr=base_lr
+)
+
 
 optimizer = paddle.optimizer.Adam(learning_rate=train_parameters['learning_strategy']['lr'],
                                   parameters=model.parameters()) # 优化器，常用的梯度下降算法
@@ -415,7 +451,7 @@ callback = paddle.callbacks.VisualDL(log_dir='visualdl_log_dir') # 可视化回�
 model.fit(train_data=Reader(data_path='/home/aistudio/data', mode='train'),
             eval_data=Reader(data_path='/home/aistudio/data', mode='eval'),
             batch_size=16,
-            epochs=18,
+            epochs=25,
             save_dir="output/",
             save_freq=5,       #保存模型的频率，多少个 epoch 保存一次模型
             log_freq=20,     #日志打印的频率，多少个 step 打印一次日志
