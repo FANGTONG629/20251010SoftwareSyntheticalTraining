@@ -52,6 +52,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from paddle.io import Dataset
 import paddle.vision.transforms as T
+from paddle.optimizer import lr
 
 
 '''
@@ -71,7 +72,7 @@ train_parameters = {
     "skip_steps": 10,
     "save_steps": 300, 
     "learning_strategy": {                                    #优化函数相关的配置
-        "lr": 0.0001                                          #超参数学习率
+        "lr": 0.0001                                         #超参数学习率
     },
     "test_path": "/home/aistudio/data/test",  # 测试集路径
     "test_list_path": "/home/aistudio/data/testpath.txt",  # 测试集文件列表
@@ -81,7 +82,6 @@ train_parameters = {
 }
 
 
-# 数据准备
 def unzip_data(src_path,target_path):
     '''
     解压原始数据集，将src_path路径下的zip包解压至target_path目录下
@@ -249,6 +249,11 @@ class Reader(Dataset):
         :param index: 文件索引号
         :return:
         """
+        img_path = self.img_paths[index]
+        img = Image.open(img_path)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
         # 替换原有的简单预处理，使用数据增强组合
         transform = T.Compose([
             T.RandomResizedCrop(224),           # 随机裁剪并缩放
@@ -397,30 +402,27 @@ class VGGNet(paddle.nn.Layer):
 
 
 
-# ResNet101模型
+# 定义ResNet101模型
 class ResNetModel(paddle.nn.Layer):
     def __init__(self, num_classes=40):
         super(ResNetModel, self).__init__()
-        
-        # 加载预训练的ResNet101模型
         self.backbone = paddle.vision.models.resnet101(pretrained=True)
-        
-        # 获取ResNet101的输出特征维度
         in_features = self.backbone.fc.weight.shape[0]
         
-        # 替换最后的全连接层，适配我们的分类任务
+        # 简化全连接层
         self.backbone.fc = paddle.nn.Linear(in_features, num_classes)
         
-        # 添加Dropout层防止过拟合
+        # 添加Dropout（确保定义）
         self.dropout = paddle.nn.Dropout(0.2)
 
     def forward(self, x, label=None):
-        # 前向传播
         x = self.backbone(x)
-        x = self.dropout(x)
+        
+        # 只在训练时使用Dropout
+        if self.training:
+            x = self.dropout(x)
         
         if label is not None:
-            # 计算准确率
             acc = paddle.metric.accuracy(input=x, label=label)
             return x, acc
         else:
@@ -437,7 +439,7 @@ print(train_parameters['label_dict'])
 
 #高层API
 # 定义输入
-input_define = paddle.static.InputSpec(shape=[-1, 3 , 244, 244],
+input_define = paddle.static.InputSpec(shape=[-1, 3 , 224, 224],
                                    dtype="float32",
                                    name="img")
 
@@ -445,7 +447,10 @@ label_define = paddle.static.InputSpec(shape=[-1, 1],
                                        dtype="int64",
                                        name="label")  
 
- # 实例化网络 - 使用ResNet101
+# 数据准备
+rm -rf ./output/*
+
+# 实例化网络 - 使用ResNet101
 model = ResNetModel(num_classes=train_parameters['class_dim'])
 model = paddle.Model(model, inputs=input_define, labels=label_define)
 
@@ -456,28 +461,47 @@ model = paddle.Model(model, inputs=input_define, labels=label_define) # 高层AP
 params_info = model.summary((1,3,244,244)) # 生成模型的详细结构信息
 print(params_info) # 打印模型基础结构和参数信息
 
+# 执行学习率测试
+#optimal_lr = find_optimal_learning_rate()
+#print(f"\n 使用最佳学习率 {optimal_lr} 进行正式训练")
+
 # 使用内置的学习率调度器
-warmup_epochs = 7
-total_epochs = 25
+warmup_epochs = 5
+total_epochs = 15
 base_lr = 0.0001
+#base_lr = optimal_lr  # 使用测试得到的最佳学习率
+
+
 
 # 创建线性热身 + 余弦衰减的学习率调度器
 lr = paddle.optimizer.lr.LinearWarmup(
     learning_rate=paddle.optimizer.lr.CosineAnnealingDecay(
         learning_rate=base_lr,
-        T_max=total_epochs - warmup_epochs
+        T_max=(total_epochs - warmup_epochs) * 787  # 修正：余弦衰减的总步数
     ),
-    warmup_steps=warmup_epochs * 787,  # 假设每个epoch有100个step
+    warmup_steps=warmup_epochs * 787,  # 使用实际的step数：787
     start_lr=base_lr / 10,
     end_lr=base_lr
 )
+# 验证学习率配置
+print(f"学习率配置详情:")
+print(f"- 基础学习率: {base_lr}")
+print(f"- 总epoch数: {total_epochs}")
+print(f"- 热身epoch数: {warmup_epochs}")
+print(f"- 每个epoch步数: 787")
+print(f"- 热身总步数: {warmup_epochs * 787}")
+print(f"- 余弦衰减总步数: {(total_epochs - warmup_epochs) * 787}")
 
-optimizer = paddle.optimizer.Adam(learning_rate=lr,
-                                  parameters=model.parameters()) # 优化器，常用的梯度下降算法
-'''
-optimizer = paddle.optimizer.Adam(learning_rate=train_parameters['learning_strategy']['lr'],
-                                  parameters=model.parameters()) # 优化器，常用的梯度下降算法
-'''
+
+
+#optimizer = paddle.optimizer.Adam(learning_rate=train_parameters['learning_strategy']['lr'],
+#                                  parameters=model.parameters()) # 优化器，常用的梯度下降算法
+
+optimizer = paddle.optimizer.Adam(
+    learning_rate=lr,
+    parameters=model.parameters()
+)
+
 # 模型准备
 model.prepare(optimizer=optimizer,
                 loss=paddle.nn.CrossEntropyLoss(),   # 损失函数使用交叉熵，
@@ -489,7 +513,7 @@ callback = paddle.callbacks.VisualDL(log_dir='visualdl_log_dir') # 可视化回�
 model.fit(train_data=Reader(data_path='/home/aistudio/data', mode='train'),
             eval_data=Reader(data_path='/home/aistudio/data', mode='eval'),
             batch_size=16,
-            epochs=25,
+            epochs=15,
             save_dir="output/",
             save_freq=5,       #保存模型的频率，多少个 epoch 保存一次模型
             log_freq=20,     #日志打印的频率，多少个 step 打印一次日志
@@ -533,11 +557,22 @@ class InferDataset(Dataset): # 与定义Reader的方式相同
         # 使用Pillow来读取图像数据并转成Numpy格式
         img = Image.open(img_path)
         if img.mode != 'RGB': 
-            img = img.convert('RGB') 
+            img = img.convert('RGB')
+        # 使用与训练相同的预处理（去掉随机性）
+        transform = T.Compose([
+            T.Resize(256),
+            T.CenterCrop(224),  # 中心裁剪而不是随机裁剪
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                       std=[0.229, 0.224, 0.225])
+        ])
+        
+        img = transform(img)
+        ''' 
         img = img.resize((224, 224), Image.ANTIALIAS) # 抗锯齿，高质量但较慢
         img = np.array(img).astype('float32') 
         img = img.transpose((2, 0, 1)) / 255  # HWC to CHW 并像素归一化
-
+        '''
         return img
 
     def __len__(self):
@@ -554,7 +589,7 @@ def predict_test_set_simple():
         test_files = [line.strip() for line in f.readlines() if line.strip()]
     
     all_results = []
-    
+
     # 实例化推理模型 - 使用ResNetModel
     model = paddle.Model(ResNetModel(num_classes=train_parameters['class_dim']), inputs=input_define)
     '''
@@ -575,12 +610,17 @@ def predict_test_set_simple():
             result = paddle.to_tensor(result)
             result = paddle.nn.functional.softmax(result)
             lab = np.argmax(result.numpy())
+
+            prob = np.max(result.numpy())  # 获取最大概率值
+            
+            # 实时输出预测结果
+            print(f"图片: {img_name:<15} | 预测标签: {lab:<2} | 置信度: {prob:.4f} | 类别: {train_parameters['label_dict'].get(str(lab), '未知')}")
             
             all_results.append(img_name + "\t" + str(lab))
             
         except Exception as e:
             print(f"处理 {img_name} 出错: {e}")
-            all_results.append(img_name + "\t" + "0")
+            all_results.append(img_name + "\t" + "0")  # 出错时使用默认标签
         
         if (i + 1) % 50 == 0:
             print(f"已处理 {i + 1} 张图片")
@@ -598,7 +638,8 @@ test_results = predict_test_set_simple()
 
 
 
-# 模型预测     
+# 模型预测
+       
 label_dic = train_parameters['label_dict']
 print(label_dic)
 infer_path='infer_image.jpg'
@@ -606,7 +647,7 @@ infer_img = Image.open(infer_path)
 #根据数组绘制图像
 plt.imshow(infer_img)          
 #显示图像
-plt.show()                    
+plt.show()  
 # 实例化推理模型 - 使用ResNetModel
 model = paddle.Model(ResNetModel(num_classes=train_parameters['class_dim']), inputs=input_define)
 '''                  
